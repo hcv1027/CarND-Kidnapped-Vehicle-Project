@@ -49,7 +49,8 @@ void ParticleFilter::init(double x, double y, double theta, double std[]) {
     particle.id = i;
     particle.x = dist_x(gen);
     particle.y = dist_y(gen);
-    particle.theta = fmod(dist_theta(gen), double_pi);
+    // particle.theta = fmod(dist_theta(gen), double_pi);
+    particle.theta = dist_theta(gen);
     particle.weight = init_weight;
     particles_.push_back(particle);
   }
@@ -78,8 +79,9 @@ void ParticleFilter::prediction(double delta_t, double std_pos[],
   const double yaw_rate_threshold = 0.001;
   for (int i = 0; i < num_particles_; ++i) {
     const double& theta = particles_[i].theta;
-    const double new_theta =
-        fmod(theta + delta_theta + dist_theta(gen), double_pi);
+    // const double new_theta =
+    //     fmod(theta + delta_theta + dist_theta(gen), double_pi);
+    const double new_theta = theta + delta_theta + dist_theta(gen);
     if (yaw_rate < yaw_rate_threshold) {
       // If the yaw_rate is too small, using the motion model whithout raw_rate.
       // Otherwise, velocity/yaw_rate will become too large, and the particle in
