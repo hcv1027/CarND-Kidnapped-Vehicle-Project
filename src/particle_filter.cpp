@@ -43,13 +43,14 @@ void ParticleFilter::init(double x, double y, double theta, double std[]) {
   // TODO: Set the number of particles
   num_particles_ = 100;
   const double double_pi = 2.0 * M_PI;
+  const double init_weight = 1.0 / num_particles_;
   for (int i = 0; i < num_particles_; ++i) {
     Particle particle;
     particle.id = i;
     particle.x = dist_x(gen);
     particle.y = dist_y(gen);
     particle.theta = fmod(dist_theta(gen), double_pi);
-    particle.weight = 1.0;
+    particle.weight = init_weight;
     particles_.push_back(particle);
   }
 
@@ -70,17 +71,26 @@ void ParticleFilter::prediction(double delta_t, double std_pos[],
   std::normal_distribution<double> dist_x(0, std_pos[0]);
   std::normal_distribution<double> dist_y(0, std_pos[1]);
   std::normal_distribution<double> dist_theta(0, std_pos[2]);
+
   const double val_yaw = velocity / yaw_rate;
   const double delta_theta = yaw_rate * delta_t;
   const double double_pi = 2.0 * M_PI;
+  const double yaw_rate_threshold = 0.001;
   for (int i = 0; i < num_particles_; ++i) {
     const double& theta = particles_[i].theta;
     const double new_theta =
         fmod(theta + delta_theta + dist_theta(gen), double_pi);
-    particles_[i].x += val_yaw * (sin(new_theta) - sin(theta)) + dist_x(gen);
-    particles_[i].y += val_yaw * (cos(theta) - cos(new_theta)) + dist_y(gen);
+    if (yaw_rate < yaw_rate_threshold) {
+      // If the yaw_rate is too small, using the motion model whithout raw_rate.
+      // Otherwise, velocity/yaw_rate will become too large, and the particle in
+      // prediction step will shift too far away.
+      particles_[i].x += velocity * delta_t * cos(theta) + dist_x(gen);
+      particles_[i].y += velocity * delta_t * sin(theta) + dist_y(gen);
+    } else {
+      particles_[i].x += val_yaw * (sin(new_theta) - sin(theta)) + dist_x(gen);
+      particles_[i].y += val_yaw * (cos(theta) - cos(new_theta)) + dist_y(gen);
+    }
     particles_[i].theta = new_theta;
-    // particles_[i].theta = fmod(new_theta + dist_theta(gen), double_pi);
   }
 }
 
@@ -144,7 +154,7 @@ void ParticleFilter::updateWeights(double sensor_range, double std_landmark[],
   double sum_of_weights = 0.0;
   for (int i = 0; i < num_particles_; ++i) {
     Particle& particle = particles_[i];
-    vector<LandmarkObs> t_observations(observations.size());
+    vector<LandmarkObs> t_observations;
     // Observation transform
     const double cos_theta = cos(particle.theta);
     const double sin_theta = sin(particle.theta);
@@ -158,19 +168,18 @@ void ParticleFilter::updateWeights(double sensor_range, double std_landmark[],
           particle.y + (sin_theta * landmark.x) + (cos_theta * landmark.y);
       t_observations.push_back(t_landmark);
     }
-    // Particle predicts its observable landmarks accroading to its location and
-    // sensor range.
+    // Particle predicts its observable landmarks accroading to its location
+    // and sensor range.
     vector<LandmarkObs> predicted;
     for (size_t i = 0; i < map_landmarks.landmark_list.size(); ++i) {
       LandmarkObs landmark;
       landmark.id = map_landmarks.landmark_list[i].id_i;
       landmark.x = map_landmarks.landmark_list[i].x_f;
       landmark.y = map_landmarks.landmark_list[i].y_f;
-      // if (dist(particle.x, particle.y, landmark.x, landmark.y) <=
-      //     sensor_range) {
-      //   predicted.push_back(landmark);
-      // }
-      predicted.push_back(landmark);
+      if (dist(particle.x, particle.y, landmark.x, landmark.y) <=
+          sensor_range) {
+        predicted.push_back(landmark);
+      }
     }
     // Observation association
     dataAssociation(predicted, t_observations);
@@ -181,21 +190,36 @@ void ParticleFilter::updateWeights(double sensor_range, double std_landmark[],
       if (predicted_obs.id >= 0) {
         LandmarkObs& associated_obs = predicted[predicted_obs.id];
         const double x_term =
-            pow(predicted_obs.x - associated_obs.x, 2) / const_val_2;
+            pow(predicted_obs.x - associated_obs.x, 2) * const_val_2;
         const double y_term =
-            pow(predicted_obs.y - associated_obs.y, 2) / const_val_3;
-        new_weight *= const_val_1 * exp(-(x_term + y_term));
+            pow(predicted_obs.y - associated_obs.y, 2) * const_val_3;
+        double weight = const_val_1 * exp(-(x_term + y_term));
+        new_weight *= weight;
       } else {
-        std::cout << "Error, no landmark matches predicted observation"
-                  << std::endl;
+        // There are not enough predicted landmarks to match observed landmarks.
+        // It means this particle is not a good one, so I give it a low weight.
+        const double x_term = pow(predicted_obs.x * 100.0, 2) * const_val_2;
+        const double y_term = pow(predicted_obs.y * 100.0, 2) * const_val_3;
+        double weight = const_val_1 * exp(-(x_term + y_term));
+        new_weight *= weight;
       }
     }
     particle.weight = new_weight;
     sum_of_weights += new_weight;
   }
   // Normalize particle's weight
-  for (auto particle : particles_) {
-    particle.weight /= sum_of_weights;
+  if (sum_of_weights < 1e-300) {
+    // Error handling: Prevening the case of division by zero
+    // TODO: I'm not sure if I should normalize particle's weight by this way.
+    const double normalized_weight = 1.0 / num_particles_;
+    for (size_t i = 0; i < particles_.size(); ++i) {
+      particles_[i].weight = normalized_weight;
+    }
+    std::cout << "Warning: sum_of_weights is zero" << std::endl;
+  } else {
+    for (size_t i = 0; i < particles_.size(); ++i) {
+      particles_[i].weight /= sum_of_weights;
+    }
   }
 }
 
@@ -207,16 +231,17 @@ void ParticleFilter::resample() {
    *   http://en.cppreference.com/w/cpp/numeric/random/discrete_distribution
    */
   vector<float> cumulative_weight(particles_.size(), 0.0);
-  for (size_t i = 0; i < particles_.size(); ++i) {
-    cumulative_weight[i] += particles_[i].weight;
+  cumulative_weight[0] = particles_[0].weight;
+  for (size_t i = 1; i < particles_.size(); ++i) {
+    cumulative_weight[i] = cumulative_weight[i - 1] + particles_[i].weight;
   }
 
-  // Systematic resample
+  // Systematic resampling
   std::default_random_engine gen;
   std::uniform_real_distribution<double> dist(0.0, 1.0);
   const double weight_offset = 1.0 / num_particles_;
   double curr_weight = dist(gen) / num_particles_;
-  vector<int> resample_idx(num_particles_);
+  vector<int> resample_idx;
   int idx = 0;
   while (resample_idx.size() < num_particles_) {
     if (curr_weight < cumulative_weight[idx]) {
@@ -226,10 +251,8 @@ void ParticleFilter::resample() {
       idx++;
     }
   }
-  std::vector<Particle> new_particles(num_particles_);
-  const double normalized_weight = 1 / num_particles_;
+  vector<Particle> new_particles;
   for (int idx : resample_idx) {
-    particles_[idx].weight = normalized_weight;
     new_particles.push_back(particles_[idx]);
   }
   particles_ = new_particles;
